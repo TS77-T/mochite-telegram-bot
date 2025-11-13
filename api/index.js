@@ -2,18 +2,16 @@ export default async function handler(req, res) {
   if (req.method !== "POST")
     return res.status(200).send("✅ Alive and waiting for Telegram POST.");
 
-  // === Environment Variables ===
   const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
   const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
   const TWILIO_SID = process.env.TWILIO_SID;
   const TWILIO_AUTH = process.env.TWILIO_AUTH;
   const ALLOWED_USER_ID = String(process.env.ALLOWED_USER_ID || "");
-  const TWILIO_NUMBER = process.env.TWILIO_NUMBER; // optional fallback
+  const TWILIO_NUMBER = process.env.TWILIO_NUMBER;
 
   const chatId = req.body?.message?.chat?.id;
   const text = req.body?.message?.text || "";
 
-  // === Helper to reply to Telegram ===
   async function reply(t) {
     await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
@@ -22,72 +20,64 @@ export default async function handler(req, res) {
     }).catch(() => {});
   }
 
-  // === Normalize phone numbers ===
-  function normalizeNumber(raw) {
-    if (!raw || typeof raw !== "string") return raw;
-    let n = raw.trim().replace(/[\s()-]/g, "");
-    if (/^0?5\d{8}$/.test(n)) n = `+995${n.replace(/^0?/, "")}`;
-    if (/^995\d+/.test(n)) n = `+${n}`;
-    return n;
-  }
+  // extract text between labels (like your old bot)
+  function extractBetween(src, startLabel, nextLabels = []) {
+    const start = src.indexOf(startLabel);
+    if (start === -1) return "";
+    const from = start + startLabel.length;
 
-  // === Parse message text ===
-  function parseMessageText(txt) {
-    if (!txt) return null;
-    const lines = txt.split(/\n|,/).map((s) => s.trim()).filter(Boolean);
-    const kv = {};
-    for (const line of lines) {
-      const m = line.match(/^([^:：]+)[:：]\s*(.+)$/);
-      if (m) kv[m[1].trim().toLowerCase()] = m[2].trim();
+    let to = src.length;
+    for (const label of nextLabels) {
+      const idx = src.indexOf(label, from);
+      if (idx !== -1 && idx < to) to = idx;
     }
-    const sender =
-      kv["saxeli"] || kv["სახელი"] || kv["sender"] || kv["name"] || null;
-    const number =
-      kv["nomeri"] || kv["ნომერი"] || kv["number"] || kv["to"] || null;
-    const body =
-      kv["texti"] || kv["ტექსტი"] || kv["text"] || kv["body"] || null;
-    if (!sender || !number || !body) return null;
-    return { sender, number, body };
+    return src.slice(from, to).trim();
   }
 
   try {
     if (!chatId) return res.status(200).send("no chat");
 
-    // === Authorization check (type-safe) ===
+    // ✅ fixed string-safe auth check
     if (ALLOWED_USER_ID && String(chatId).trim() !== String(ALLOWED_USER_ID).trim()) {
       await reply(`❌ Not authorized.\nYour chatId: ${chatId}\nAllowed: ${ALLOWED_USER_ID}`);
       return res.status(200).send("unauthorized");
     }
 
-    // === Parse message content ===
-    const parsed = parseMessageText(text);
-    if (!parsed) {
+    // accept both Georgian and English labels
+    const sender = extractBetween(text, "saxeli:", ["nomeri:", "ნომერი:", "texti:", "ტექსტი:"]) ||
+                   extractBetween(text, "სახელი:", ["nomeri:", "ნომერი:", "texti:", "ტექსტი:"]);
+    const number = extractBetween(text, "nomeri:", ["texti:", "ტექსტი:"]) ||
+                   extractBetween(text, "ნომერი:", ["texti:", "ტექსტი:"]);
+    const messageText = extractBetween(text, "texti:", []) ||
+                        extractBetween(text, "ტექსტი:", []);
+
+    if (!sender || !number || !messageText) {
       await reply(
-        "❗ Format example:\n\nsaxeli: Mochite\nnomeri: +995514333113\ntexti: გამარჯობა!\nმეორე ხაზი ✅"
+        "❗ Format example:\n\nsaxeli: Mochite\nnomeri: +995514333113\ntexti: გამარჯობა დეა, როგორ გიკითხოთ ხო ხართ კარგად? ✅"
       );
       return res.status(200).send("bad format");
     }
 
-    const sender = parsed.sender.trim();
-    const number = normalizeNumber(parsed.number.trim());
-    let messageText = parsed.body.replace(/\r/g, "").trim();
-    messageText = messageText.replace(/\n{2,}/g, "\n");
-
-    await reply(
-      `📤 იგზავნება SMS...\n📛 Sender: ${sender}\n📱 Number: ${number}\n💬 Message:\n${messageText}`
-    );
-
-    // === Twilio send (Unicode-safe, multi-line) ===
     const authHeader = Buffer.from(`${TWILIO_SID}:${TWILIO_AUTH}`).toString("base64");
 
+    // normalize Georgian numbers
+    let to = number.trim().replace(/\s/g, "");
+    if (/^5\d{8}$/.test(to)) to = "+995" + to;
+    if (/^0?5\d{8}$/.test(to)) to = "+995" + to.replace(/^0/, "");
+
+    await reply(
+      `📤 იგზავნება SMS...\n📛 Sender: ${sender}\n📱 Number: ${to}\n💬 Message:\n${messageText}`
+    );
+
+    // Twilio send (Unicode + full text, no truncation)
     const params = new URLSearchParams({
       From: sender,
-      To: number,
+      To: to,
       Body: messageText,
-      SmartEncoding: "false", // ensures Unicode is sent directly
+      SmartEncoding: "false"
     });
 
-    let twilioResp = await fetch(
+    let twResp = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
       {
         method: "POST",
@@ -98,20 +88,20 @@ export default async function handler(req, res) {
         body: params,
       }
     );
-    let data = await twilioResp.json();
+    let data = await twResp.json();
 
-    // === Fallback if alphanumeric sender fails ===
-    if (!twilioResp.ok || data.error_code) {
+    // fallback to your number if sender name unsupported
+    if (!twResp.ok || data.error_code) {
       if (TWILIO_NUMBER) {
         await reply(
-          `⚠️ Sender '${sender}' may not be supported. Retrying from number ${TWILIO_NUMBER}...`
+          `⚠️ Sender '${sender}' may not be supported. Retrying from ${TWILIO_NUMBER}...`
         );
 
         const retryParams = new URLSearchParams({
           From: TWILIO_NUMBER,
-          To: number,
+          To: to,
           Body: messageText,
-          SmartEncoding: "false",
+          SmartEncoding: "false"
         });
 
         const retryResp = await fetch(
@@ -125,19 +115,18 @@ export default async function handler(req, res) {
             body: retryParams,
           }
         );
-
         data = await retryResp.json();
       }
     }
 
-    // === Result feedback ===
+    // report result back to Telegram
     if (data.error_code) {
       await reply(
         `⚠️ Twilio Error:\nMessage: ${data.message}\nCode: ${data.error_code}`
       );
     } else {
       await reply(
-        `✅ SMS sent!\nSID: ${data.sid || "unknown"}\nStatus: ${data.status}`
+        `✅ SMS გაგზავნილია წარმატებით!\nSID: ${data.sid || "-"}\nSender: ${sender}\nNumber: ${to}\n💬 ტექსტი:\n${messageText}`
       );
     }
 
@@ -148,3 +137,4 @@ export default async function handler(req, res) {
     return res.status(200).send("error");
   }
 }
+
