@@ -1,4 +1,3 @@
-import fetch from "node-fetch";
 
 /**
  * Telegram → Twilio (stable final version)
