@@ -2,7 +2,7 @@ import axios from "axios";
 import fetch from "node-fetch";
 
 /**
- * Telegram → Twilio full version (multiline + debug)
+ * Telegram → Twilio full stable version (with debugging + multiline fix)
  */
 
 function normalizeNumber(raw) {
@@ -45,10 +45,11 @@ export default async function handler(req, res) {
   const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
   const sendToTelegram = async (chatId, text) => {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text
-    }).catch(() => {});
+    try {
+      await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text });
+    } catch (e) {
+      console.error("Telegram send error:", e.message);
+    }
   };
 
   try {
@@ -57,6 +58,12 @@ export default async function handler(req, res) {
     const chatId = String(msg.chat.id);
     const text = (msg.text || "").trim();
 
+    console.log("Incoming Telegram message:", text);
+
+    // ✅ Confirm webhook works
+    await sendToTelegram(chatId, `✅ Bot is active.\nText received:\n${text}`);
+
+    // --- Only allow owner ---
     if (ALLOWED_USER_ID && chatId !== ALLOWED_USER_ID) {
       await sendToTelegram(chatId, "❌ You are not authorized to use this bot.");
       return res.status(200).send("unauthorized");
@@ -65,14 +72,12 @@ export default async function handler(req, res) {
     const parsed = parseMessageText(text);
     if (!parsed) {
       await sendToTelegram(chatId,
-`❗ Format example:
-
+`❗ Use format:
 saxeli: Mochite
 nomeri: +995514333113
 texti: gamarjoba!
 
 or
-
 სახელი: Mochite, ნომერი: +995514333113, ტექსტი: გამარჯობა!`);
       return res.status(200).send("bad format");
     }
@@ -81,9 +86,9 @@ or
     const number = normalizeNumber(parsed.number.trim());
     const messageText = parsed.body.replace(/\r/g, "").trim();
 
-    await sendToTelegram(chatId, `📤 იგზავნება SMS...\n📛 Sender: ${sender}\n📱 Number: ${number}\n💬 Message:\n${messageText}`);
+    await sendToTelegram(chatId, `📤 Sending SMS...\n📛 Sender: ${sender}\n📱 Number: ${number}\n💬 Message:\n${messageText}`);
 
-    // --- Raw Twilio API call ---
+    // --- Twilio REST request (raw) ---
     const authHeader = Buffer.from(`${TWILIO_SID}:${TWILIO_AUTH}`).toString("base64");
     const params = new URLSearchParams({
       From: sender,
@@ -91,31 +96,32 @@ or
       Body: messageText
     });
 
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
+    const twilioResp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
       method: "POST",
       headers: {
-        Authorization: `Basic ${authHeader}`,
+        "Authorization": `Basic ${authHeader}`,
         "Content-Type": "application/x-www-form-urlencoded"
       },
       body: params
     });
 
-    const data = await response.json();
+    const data = await twilioResp.json();
 
-    if (!response.ok || data.error_code) {
-      console.error("Twilio error:", data);
+    // ✅ Always tell you what Twilio returned
+    if (!twilioResp.ok || data.error_code) {
       await sendToTelegram(
         chatId,
-        `⚠️ Twilio Error:\nStatus: ${response.status}\nMessage: ${data.message || "Unknown"}\nCode: ${data.error_code || "none"}`
+        `⚠️ Twilio Error:\nStatus: ${twilioResp.status}\nMessage: ${data.message || "Unknown"}\nCode: ${data.error_code || "none"}`
       );
-      return res.status(200).send("twilio error");
+      console.error("Twilio error:", data);
+    } else {
+      await sendToTelegram(chatId, `✅ SMS sent successfully!\nSID: ${data.sid}\nStatus: ${data.status}`);
+      console.log("Twilio OK:", data);
     }
 
-    await sendToTelegram(chatId, `✅ SMS sent!\nSID: ${data.sid}\nStatus: ${data.status}`);
-    return res.status(200).send("sent");
-
+    return res.status(200).send("done");
   } catch (err) {
-    console.error("Error:", err);
+    console.error("Handler error:", err);
     const chatId = req.body?.message?.chat?.id;
     if (chatId) await sendToTelegram(chatId, `⚠️ Internal error: ${err.message}`);
     return res.status(200).send("error");
