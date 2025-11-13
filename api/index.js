@@ -1,7 +1,13 @@
 import axios from "axios";
-import twilio from "twilio";
+import fetch from "node-fetch";
 
-// Normalize Georgian numbers to +9955...
+/**
+ * Telegram → Twilio (raw REST) bot
+ * - Works on Vercel (serverless function)
+ * - Accepts both Georgian & transliterated formats
+ * - Sends full multi-line SMS with any sender name
+ */
+
 function normalizeNumber(raw) {
   if (!raw || typeof raw !== "string") return raw;
   let n = raw.trim().replace(/[\s()-]/g, "");
@@ -10,7 +16,6 @@ function normalizeNumber(raw) {
   return n;
 }
 
-// Parse both Georgian & transliterated formats
 function parseMessageText(text) {
   if (!text) return null;
   const quickPairs = {};
@@ -19,7 +24,6 @@ function parseMessageText(text) {
     const m = l.match(/^([^:：]+)[:：]\s*(.+)$/);
     if (m) quickPairs[m[1].trim().toLowerCase()] = m[2].trim();
   }
-
   const senderKeys = ["სახელი", "saxeli", "sxeli"];
   const numberKeys = ["ნომერი", "nomeri", "number"];
   const textKeys = ["ტექსტი", "texti", "text", "teksti"];
@@ -30,7 +34,6 @@ function parseMessageText(text) {
     if (!number && numberKeys.includes(k)) number = v;
     if (!body && textKeys.includes(k)) body = v;
   }
-
   if (!sender || !number || !body) return null;
   return { sender, number, body };
 }
@@ -50,7 +53,7 @@ export default async function handler(req, res) {
     const chatId = String(msg.chat.id);
     const text = (msg.text || "").trim();
 
-    // Authorize only your ID
+    // authorize
     if (ALLOWED_USER_ID && chatId !== ALLOWED_USER_ID) {
       await axios.post(`${TELEGRAM_API}/sendMessage`, {
         chat_id: chatId,
@@ -59,6 +62,7 @@ export default async function handler(req, res) {
       return res.status(200).send("unauthorized");
     }
 
+    // parse message
     const parsed = parseMessageText(text);
     if (!parsed) {
       await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -80,42 +84,54 @@ or
     const sender = parsed.sender.trim();
     const number = normalizeNumber(parsed.number.trim());
 
-    // ✅ Convert all types of line breaks to a single newline escape that Twilio accepts
-    const messageText = parsed.body
-      .replace(/\r/g, "")      // remove carriage returns
-      .replace(/\n{2,}/g, "\n") // collapse multiple line breaks
-      .trim();
+    // ✅ Preserve full multi-line message exactly as typed
+    const messageText = parsed.body.replace(/\r/g, "").trim();
 
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
       text: `📤 იგზავნება SMS...\n\n📛 Sender: ${sender}\n📱 Number: ${number}\n💬 Message:\n${messageText}`
     });
 
-    const client = twilio(TWILIO_SID, TWILIO_AUTH);
-
-    // ✅ Ensure body is a full UTF-8 string (no truncation)
-    const fullBody = Buffer.from(messageText, "utf8").toString();
-
-    const tw = await client.messages.create({
-      from: sender,
-      to: number,
-      body: fullBody
+    // 🔧 Raw REST call (bypass SDK) — ensures Twilio gets the whole text
+    const authHeader = Buffer.from(`${TWILIO_SID}:${TWILIO_AUTH}`).toString("base64");
+    const params = new URLSearchParams({
+      From: sender,
+      To: number,
+      Body: messageText
     });
+
+    const twResp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${authHeader}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: params
+    });
+
+    const tw = await twResp.json();
+
+    if (tw.error_code) {
+      await axios.post(`${TELEGRAM_API}/sendMessage`, {
+        chat_id: chatId,
+        text: `⚠️ Twilio error: ${tw.message || "Unknown"}`
+      });
+      return res.status(200).send("twilio error");
+    }
 
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
-      text: `✅ SMS sent successfully!\nSID: ${tw.sid}`
+      text: `✅ SMS sent!\nSID: ${tw.sid || "unknown"}`
     });
 
     return res.status(200).send("sent");
   } catch (err) {
     console.error("Error:", err.message);
-    const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}`;
     const chatId = req.body?.message?.chat?.id;
     if (chatId) {
       await axios.post(`${TELEGRAM_API}/sendMessage`, {
         chat_id: chatId,
-        text: `⚠️ Error: ${err.message}`
+        text: `⚠️ Internal error: ${err.message}`
       }).catch(() => {});
     }
     return res.status(200).send("error");
