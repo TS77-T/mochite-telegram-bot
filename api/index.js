@@ -1,129 +1,44 @@
-import axios from "axios";
-import fetch from "node-fetch";
-
-/**
- * Telegram → Twilio full stable version (with debugging + multiline fix)
- */
-
-function normalizeNumber(raw) {
-  if (!raw || typeof raw !== "string") return raw;
-  let n = raw.trim().replace(/[\s()-]/g, "");
-  if (/^0?5\d{8}$/.test(n)) n = `+995${n.replace(/^0?/, "")}`;
-  if (/^995\d+/.test(n)) n = `+${n}`;
-  return n;
-}
-
-function parseMessageText(text) {
-  if (!text) return null;
-  const quickPairs = {};
-  const lines = text.split(/\n|,/).map(s => s.trim()).filter(Boolean);
-  for (const l of lines) {
-    const m = l.match(/^([^:：]+)[:：]\s*(.+)$/);
-    if (m) quickPairs[m[1].trim().toLowerCase()] = m[2].trim();
-  }
-  const senderKeys = ["სახელი", "saxeli", "sxeli"];
-  const numberKeys = ["ნომერი", "nomeri", "number"];
-  const textKeys = ["ტექსტი", "texti", "text", "teksti"];
-
-  let sender, number, body;
-  for (const [k, v] of Object.entries(quickPairs)) {
-    if (!sender && senderKeys.includes(k)) sender = v;
-    if (!number && numberKeys.includes(k)) number = v;
-    if (!body && textKeys.includes(k)) body = v;
-  }
-  if (!sender || !number || !body) return null;
-  return { sender, number, body };
-}
-
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(200).send("OK");
-
-  const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-  const ALLOWED_USER_ID = String(process.env.ALLOWED_USER_ID || "");
-  const TWILIO_SID = process.env.TWILIO_SID;
-  const TWILIO_AUTH = process.env.TWILIO_AUTH;
-  const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
-
-  const sendToTelegram = async (chatId, text) => {
-    try {
-      await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text });
-    } catch (e) {
-      console.error("Telegram send error:", e.message);
-    }
-  };
-
   try {
-    const msg = req.body?.message;
-    if (!msg) return res.status(200).send("no message");
-    const chatId = String(msg.chat.id);
-    const text = (msg.text || "").trim();
+    console.log("Function invoked:", req.method);
 
-    console.log("Incoming Telegram message:", text);
-
-    // ✅ Confirm webhook works
-    await sendToTelegram(chatId, `✅ Bot is active.\nText received:\n${text}`);
-
-    // --- Only allow owner ---
-    if (ALLOWED_USER_ID && chatId !== ALLOWED_USER_ID) {
-      await sendToTelegram(chatId, "❌ You are not authorized to use this bot.");
-      return res.status(200).send("unauthorized");
+    // Confirm server is alive
+    if (req.method !== "POST") {
+      return res.status(200).send("✅ Serverless function is alive! Use POST for Telegram webhook.");
     }
 
-    const parsed = parseMessageText(text);
-    if (!parsed) {
-      await sendToTelegram(chatId,
-`❗ Use format:
-saxeli: Mochite
-nomeri: +995514333113
-texti: gamarjoba!
+    // Telegram webhook test
+    const body = req.body || {};
+    console.log("Request body:", body);
 
-or
-სახელი: Mochite, ნომერი: +995514333113, ტექსტი: გამარჯობა!`);
-      return res.status(200).send("bad format");
+    const token = process.env.TELEGRAM_TOKEN;
+    const chatId = body?.message?.chat?.id;
+    const text = body?.message?.text || "(no text)";
+
+    if (!token) {
+      console.error("Missing TELEGRAM_TOKEN in environment!");
+      return res.status(500).send("Missing TELEGRAM_TOKEN");
     }
 
-    const sender = parsed.sender.trim();
-    const number = normalizeNumber(parsed.number.trim());
-    const messageText = parsed.body.replace(/\r/g, "").trim();
+    if (!chatId) {
+      console.log("No chatId, probably not from Telegram.");
+      return res.status(200).send("No chatId in body");
+    }
 
-    await sendToTelegram(chatId, `📤 Sending SMS...\n📛 Sender: ${sender}\n📱 Number: ${number}\n💬 Message:\n${messageText}`);
-
-    // --- Twilio REST request (raw) ---
-    const authHeader = Buffer.from(`${TWILIO_SID}:${TWILIO_AUTH}`).toString("base64");
-    const params = new URLSearchParams({
-      From: sender,
-      To: number,
-      Body: messageText
-    });
-
-    const twilioResp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
+    // Reply to Telegram
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
-      headers: {
-        "Authorization": `Basic ${authHeader}`,
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: params
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: `✅ Webhook working!\nText received:\n${text}`
+      })
     });
 
-    const data = await twilioResp.json();
-
-    // ✅ Always tell you what Twilio returned
-    if (!twilioResp.ok || data.error_code) {
-      await sendToTelegram(
-        chatId,
-        `⚠️ Twilio Error:\nStatus: ${twilioResp.status}\nMessage: ${data.message || "Unknown"}\nCode: ${data.error_code || "none"}`
-      );
-      console.error("Twilio error:", data);
-    } else {
-      await sendToTelegram(chatId, `✅ SMS sent successfully!\nSID: ${data.sid}\nStatus: ${data.status}`);
-      console.log("Twilio OK:", data);
-    }
-
-    return res.status(200).send("done");
-  } catch (err) {
-    console.error("Handler error:", err);
-    const chatId = req.body?.message?.chat?.id;
-    if (chatId) await sendToTelegram(chatId, `⚠️ Internal error: ${err.message}`);
-    return res.status(200).send("error");
+    console.log("Telegram API status:", response.status);
+    return res.status(200).send("OK");
+  } catch (error) {
+    console.error("Handler crash:", error);
+    return res.status(500).send("Internal server error: " + error.message);
   }
 }
