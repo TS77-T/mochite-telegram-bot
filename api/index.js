@@ -7,7 +7,7 @@ export default async function handler(req, res) {
   const TWILIO_SID = process.env.TWILIO_SID;
   const TWILIO_AUTH = process.env.TWILIO_AUTH;
   const ALLOWED_USER_ID = String(process.env.ALLOWED_USER_ID || "");
-  const TWILIO_NUMBER = process.env.TWILIO_NUMBER; // optional fallback (+XXXXXXXX)
+  const TWILIO_NUMBER = process.env.TWILIO_NUMBER; // optional fallback number
 
   const chatId = req.body?.message?.chat?.id;
   const text = req.body?.message?.text || "";
@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     }).catch(() => {});
   }
 
-  // --- helper: format phone number
+  // normalize phone numbers
   function normalizeNumber(raw) {
     if (!raw || typeof raw !== "string") return raw;
     let n = raw.trim().replace(/[\s()-]/g, "");
@@ -29,7 +29,7 @@ export default async function handler(req, res) {
     return n;
   }
 
-  // --- helper: parse Telegram message
+  // parse Telegram text
   function parseMessageText(txt) {
     if (!txt) return null;
     const lines = txt.split(/\n|,/).map((s) => s.trim()).filter(Boolean);
@@ -51,8 +51,8 @@ export default async function handler(req, res) {
   try {
     if (!chatId) return res.status(200).send("no chat");
 
-    // --- authorization check with debug message
-    if (ALLOWED_USER_ID && chatId !== ALLOWED_USER_ID) {
+    // ✅ Fixed authorization: always compares as strings
+    if (ALLOWED_USER_ID && String(chatId).trim() !== String(ALLOWED_USER_ID).trim()) {
       await reply(`❌ Not authorized.\nYour chatId: ${chatId}\nAllowed: ${ALLOWED_USER_ID}`);
       return res.status(200).send("unauthorized");
     }
@@ -74,7 +74,7 @@ export default async function handler(req, res) {
       `📤 იგზავნება SMS...\n📛 Sender: ${sender}\n📱 Number: ${number}\n💬 Message:\n${messageText}`
     );
 
-    // --- send via Twilio
+    // Twilio send
     const authHeader = Buffer.from(`${TWILIO_SID}:${TWILIO_AUTH}`).toString("base64");
 
     let twilioResp = await fetch(
@@ -94,7 +94,7 @@ export default async function handler(req, res) {
     );
     let data = await twilioResp.json();
 
-    // fallback if sender name fails
+    // fallback if alphanumeric sender fails
     if (!twilioResp.ok || data.error_code) {
       if (TWILIO_NUMBER) {
         await reply(
@@ -135,4 +135,3 @@ export default async function handler(req, res) {
     return res.status(200).send("error");
   }
 }
-
