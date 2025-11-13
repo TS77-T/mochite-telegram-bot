@@ -2,16 +2,18 @@ export default async function handler(req, res) {
   if (req.method !== "POST")
     return res.status(200).send("✅ Alive and waiting for Telegram POST.");
 
+  // === Environment Variables ===
   const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
   const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
   const TWILIO_SID = process.env.TWILIO_SID;
   const TWILIO_AUTH = process.env.TWILIO_AUTH;
   const ALLOWED_USER_ID = String(process.env.ALLOWED_USER_ID || "");
-  const TWILIO_NUMBER = process.env.TWILIO_NUMBER; // optional fallback number
+  const TWILIO_NUMBER = process.env.TWILIO_NUMBER; // optional fallback
 
   const chatId = req.body?.message?.chat?.id;
   const text = req.body?.message?.text || "";
 
+  // === Helper to reply to Telegram ===
   async function reply(t) {
     await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
@@ -20,7 +22,7 @@ export default async function handler(req, res) {
     }).catch(() => {});
   }
 
-  // normalize phone numbers
+  // === Normalize phone numbers ===
   function normalizeNumber(raw) {
     if (!raw || typeof raw !== "string") return raw;
     let n = raw.trim().replace(/[\s()-]/g, "");
@@ -29,7 +31,7 @@ export default async function handler(req, res) {
     return n;
   }
 
-  // parse Telegram text
+  // === Parse message text ===
   function parseMessageText(txt) {
     if (!txt) return null;
     const lines = txt.split(/\n|,/).map((s) => s.trim()).filter(Boolean);
@@ -51,12 +53,13 @@ export default async function handler(req, res) {
   try {
     if (!chatId) return res.status(200).send("no chat");
 
-    // ✅ Fixed authorization: always compares as strings
+    // === Authorization check (type-safe) ===
     if (ALLOWED_USER_ID && String(chatId).trim() !== String(ALLOWED_USER_ID).trim()) {
       await reply(`❌ Not authorized.\nYour chatId: ${chatId}\nAllowed: ${ALLOWED_USER_ID}`);
       return res.status(200).send("unauthorized");
     }
 
+    // === Parse message content ===
     const parsed = parseMessageText(text);
     if (!parsed) {
       await reply(
@@ -74,8 +77,15 @@ export default async function handler(req, res) {
       `📤 იგზავნება SMS...\n📛 Sender: ${sender}\n📱 Number: ${number}\n💬 Message:\n${messageText}`
     );
 
-    // Twilio send
+    // === Twilio send (Unicode-safe, multi-line) ===
     const authHeader = Buffer.from(`${TWILIO_SID}:${TWILIO_AUTH}`).toString("base64");
+
+    const params = new URLSearchParams({
+      From: sender,
+      To: number,
+      Body: messageText,
+      SmartEncoding: "false", // ensures Unicode is sent directly
+    });
 
     let twilioResp = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
@@ -83,23 +93,26 @@ export default async function handler(req, res) {
         method: "POST",
         headers: {
           Authorization: `Basic ${authHeader}`,
-          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
-        body: new URLSearchParams({
-          From: sender,
-          To: number,
-          Body: messageText,
-        }),
+        body: params,
       }
     );
     let data = await twilioResp.json();
 
-    // fallback if alphanumeric sender fails
+    // === Fallback if alphanumeric sender fails ===
     if (!twilioResp.ok || data.error_code) {
       if (TWILIO_NUMBER) {
         await reply(
           `⚠️ Sender '${sender}' may not be supported. Retrying from number ${TWILIO_NUMBER}...`
         );
+
+        const retryParams = new URLSearchParams({
+          From: TWILIO_NUMBER,
+          To: number,
+          Body: messageText,
+          SmartEncoding: "false",
+        });
 
         const retryResp = await fetch(
           `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
@@ -107,25 +120,25 @@ export default async function handler(req, res) {
             method: "POST",
             headers: {
               Authorization: `Basic ${authHeader}`,
-              "Content-Type": "application/x-www-form-urlencoded",
+              "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
             },
-            body: new URLSearchParams({
-              From: TWILIO_NUMBER,
-              To: number,
-              Body: messageText,
-            }),
+            body: retryParams,
           }
         );
+
         data = await retryResp.json();
       }
     }
 
+    // === Result feedback ===
     if (data.error_code) {
       await reply(
         `⚠️ Twilio Error:\nMessage: ${data.message}\nCode: ${data.error_code}`
       );
     } else {
-      await reply(`✅ SMS sent!\nSID: ${data.sid || "unknown"}\nStatus: ${data.status}`);
+      await reply(
+        `✅ SMS sent!\nSID: ${data.sid || "unknown"}\nStatus: ${data.status}`
+      );
     }
 
     return res.status(200).send("ok");
